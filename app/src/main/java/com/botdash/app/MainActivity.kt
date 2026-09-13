@@ -1,6 +1,7 @@
 package com.botdash.app
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -15,16 +16,16 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var config: ConfigStore
     private lateinit var webView: WebView
     private lateinit var statusText: TextView
+    private lateinit var connectButton: Button
     private val handler = Handler(Looper.getMainLooper())
     private var pollingForConnection = false
 
     private val notifPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* lanjut apapun hasilnya, notifikasi cuma nice-to-have */ }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,17 +34,16 @@ class MainActivity : AppCompatActivity() {
         config = ConfigStore(this)
         webView = findViewById(R.id.webView)
         statusText = findViewById(R.id.statusText)
+        connectButton = findViewById(R.id.btnConnect)
 
-        webView.settings.javaScriptEnabled = true
-        webView.settings.domStorageEnabled = true
-        webView.webViewClient = WebViewClient()
+        configureWebView()
 
         findViewById<Button>(R.id.btnSettings).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-
-        findViewById<Button>(R.id.btnConnect).setOnClickListener {
-            connectAndLoad()
+        connectButton.setOnClickListener {
+            if (TunnelService.isRunning || TunnelService.isConnecting) disconnect()
+            else connectAndLoad()
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -53,49 +53,111 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (TunnelService.isRunning) {
-            statusText.text = "Terhubung"
-            loadDashboard()
+        updateUiFromTunnelState()
+        if (TunnelService.isRunning) loadDashboard()
+    }
+
+    private fun configureWebView() {
+        webView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            allowFileAccess = false
+            allowContentAccess = false
+            builtInZoomControls = false
+            displayZoomControls = false
+        }
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                webView.clearHistory()
+            }
         }
     }
 
     private fun connectAndLoad() {
-        if (!config.isConfigured()) {
-            Toast.makeText(this, "Isi dulu Pengaturan (host, username, key)", Toast.LENGTH_LONG).show()
+        if (!config.isConfigured() || !KeyStore(this).hasKey()) {
+            Toast.makeText(this, "Isi host, username, dan key .pem di Pengaturan", Toast.LENGTH_LONG).show()
             startActivity(Intent(this, SettingsActivity::class.java))
             return
         }
 
+        TunnelService.lastError = null
         statusText.text = "Menyambungkan..."
-        val intent = Intent(this, TunnelService::class.java)
+        connectButton.text = "Putus"
+        val intent = Intent(this, TunnelService::class.java).setAction(TunnelService.ACTION_CONNECT)
         ContextCompat.startForegroundService(this, intent)
-
         pollingForConnection = true
-        pollConnectionStatus()
+        handler.post { pollConnectionStatus() }
+    }
+
+    private fun disconnect() {
+        pollingForConnection = false
+        startService(Intent(this, TunnelService::class.java).setAction(TunnelService.ACTION_DISCONNECT))
+        statusText.text = "Terputus"
+        connectButton.text = "Konek"
+        webView.loadUrl("about:blank")
     }
 
     private fun pollConnectionStatus() {
         if (!pollingForConnection) return
-        if (TunnelService.isRunning) {
-            statusText.text = "Terhubung"
-            pollingForConnection = false
-            loadDashboard()
-        } else if (TunnelService.lastError != null) {
-            statusText.text = "Gagal: ${TunnelService.lastError}"
-            pollingForConnection = false
-        } else {
-            handler.postDelayed({ pollConnectionStatus() }, 1000)
+        when {
+            TunnelService.isRunning -> {
+                statusText.text = "Terhubung"
+                connectButton.text = "Putus"
+                pollingForConnection = false
+                loadDashboard()
+            }
+            TunnelService.lastError != null -> {
+                statusText.text = "Gagal: ${TunnelService.lastError}"
+                connectButton.text = "Konek"
+                pollingForConnection = false
+            }
+            TunnelService.isConnecting -> {
+                statusText.text = "Menyambungkan..."
+                handler.postDelayed({ pollConnectionStatus() }, 500)
+            }
+            else -> {
+                statusText.text = "Terputus"
+                connectButton.text = "Konek"
+                pollingForConnection = false
+            }
+        }
+    }
+
+    private fun updateUiFromTunnelState() {
+        when {
+            TunnelService.isRunning -> {
+                statusText.text = "Terhubung"
+                connectButton.text = "Putus"
+            }
+            TunnelService.isConnecting -> {
+                statusText.text = "Menyambungkan..."
+                connectButton.text = "Putus"
+            }
+            TunnelService.lastError != null -> {
+                statusText.text = "Gagal: ${TunnelService.lastError}"
+                connectButton.text = "Konek"
+            }
+            else -> {
+                statusText.text = "Belum terhubung"
+                connectButton.text = "Konek"
+            }
         }
     }
 
     private fun loadDashboard() {
         val port = config.getLocalPort()
         val token = config.getDashboardToken()
-        webView.loadUrl("http://127.0.0.1:$port/?token=$token")
+        val builder = Uri.Builder()
+            .scheme("http")
+            .encodedAuthority("localhost:$port")
+            .path("/")
+        if (token.isNotEmpty()) builder.appendQueryParameter("token", token)
+        webView.loadUrl(builder.build().toString())
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        handler.removeCallbacksAndMessages(null)
         pollingForConnection = false
+        super.onDestroy()
     }
 }
