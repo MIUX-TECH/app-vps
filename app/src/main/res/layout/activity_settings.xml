@@ -21,13 +21,17 @@
             android:id="@+id/inputHost"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Host VPS (contoh: 3.27.32.99)" />
+            android:hint="Host VPS (contoh: 3.27.32.99)"
+            android:inputType="textUri"
+            android:singleLine="true" />
 
         <EditText
             android:id="@+id/inputUsername"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="Username SSH (contoh: admin)"
+            android:inputType="text"
+            android:singleLine="true"
             android:layout_marginTop="8dp" />
 
         <EditText
@@ -47,10 +51,20 @@
             android:layout_marginTop="8dp" />
 
         <EditText
+            android:id="@+id/inputLocalPort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Port lokal HP (default: 8080)"
+            android:inputType="number"
+            android:layout_marginTop="8dp" />
+
+        <EditText
             android:id="@+id/inputDashboardToken"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="Token dashboard (DASHBOARD_TOKEN)"
+            android:inputType="textPassword"
+            android:singleLine="true"
             android:layout_marginTop="8dp" />
 
         <EditText
@@ -59,7 +73,25 @@
             android:layout_height="wrap_content"
             android:hint="Passphrase key (kosongkan jika tidak ada)"
             android:inputType="textPassword"
+            android:singleLine="true"
             android:layout_marginTop="8dp" />
+
+        <EditText
+            android:id="@+id/inputFingerprint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="SSH SHA-256 fingerprint (opsional)"
+            android:inputType="text"
+            android:singleLine="true"
+            android:layout_marginTop="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Jika fingerprint dikosongkan, koneksi pertama memakai Trust-On-First-Use (TOFU), lalu host key disimpan. Untuk keamanan lebih tinggi, isi fingerprint SHA-256 dari host VPS terlebih dahulu."
+            android:textSize="12sp"
+            android:textColor="#777777"
+            android:layout_marginTop="6dp" />
 
         <TextView
             android:id="@+id/keyStatus"
@@ -83,12 +115,11 @@
             android:layout_marginTop="24dp" />
 
         <TextView
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Catatan: file key .pem disimpan terenkripsi di storage internal app ini saja (Android Keystore), tidak pernah dikirim ke mana pun."
+            android:text="Private key disimpan terenkripsi dengan Android Keystore. Token dan passphrase juga terenkripsi. Koneksi SSH dibuat langsung dari HP ke VPS; tidak melalui server pihak ketiga."
             android:textSize="12sp"
             android:textColor="#888888"
             android:layout_marginTop="16dp" />
-
     </LinearLayout>
 </ScrollView>
