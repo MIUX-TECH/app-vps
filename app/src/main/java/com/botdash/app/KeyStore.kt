@@ -7,6 +7,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 
 /** Encrypts the PEM bytes with an AES-256 key held by Android Keystore. */
 class KeyStore(private val context: Context) {
@@ -22,8 +24,16 @@ class KeyStore(private val context: Context) {
         val existing = ks.getKey(KEY_ALIAS, null)
         if (existing is SecretKey) return existing
 
-        val generator = KeyGenerator.getInstance("AES", ANDROID_KEYSTORE)
-        generator.init(256)
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        val spec = KeyGenParameterSpec.Builder(
+            KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setKeySize(256)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .build()
+        generator.init(spec)
         return generator.generateKey()
     }
 
