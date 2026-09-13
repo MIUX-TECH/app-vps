@@ -9,121 +9,211 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.jcraft.jsch.JSch
+import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Session
 import java.io.File
-import kotlin.concurrent.thread
+import java.security.MessageDigest
+import java.util.Base64
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Foreground service yang membuka SSH local port-forward ke VPS:
- *   127.0.0.1:<localPort> (di HP)  ->  127.0.0.1:<remotePort> (di VPS)
- *
- * Ini setara dengan menjalankan:
- *   ssh -L <localPort>:127.0.0.1:<remotePort> -i key.pem user@host -N
- * tapi terintegrasi langsung di dalam app, tidak perlu Termux terpisah.
- *
- * Kenapa harus foreground service (bukan background biasa): Android akan
- * membunuh proses background setelah beberapa saat jika tidak ada
- * foreground service dengan notifikasi -- tunnel akan putus sendiri kalau
- * ini tidak dijalankan sebagai foreground service.
- */
+/** Owns one SSH local port-forward for the dashboard. */
 class TunnelService : Service() {
-
     companion object {
+        const val ACTION_CONNECT = "com.botdash.app.CONNECT"
+        const val ACTION_DISCONNECT = "com.botdash.app.DISCONNECT"
         const val CHANNEL_ID = "tunnel_channel"
         const val NOTIF_ID = 1001
-        var isRunning = false
+
+        @Volatile var isRunning = false
             private set
-        var lastError: String? = null
+        @Volatile var isConnecting = false
+            private set
+        @Volatile var lastError: String? = null
+        @Volatile var lastFingerprint: String? = null
             private set
     }
 
+    private val executor = Executors.newSingleThreadExecutor()
+    private val stopping = AtomicBoolean(false)
     private var session: Session? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIF_ID, buildNotification("Menyambungkan ke VPS..."))
-
-        thread {
-            try {
-                val prefs = ConfigStore(this)
-                val host = prefs.getHost()
-                val port = prefs.getSshPort()
-                val username = prefs.getUsername()
-                val localPort = prefs.getLocalPort()
-                val remotePort = prefs.getRemotePort()
-                val keyBytes = KeyStore(this).readKey()
-
-                if (host.isBlank() || username.isBlank() || keyBytes == null) {
-                    lastError = "Konfigurasi belum lengkap. Isi dulu di halaman Pengaturan."
-                    updateNotification("Gagal: konfigurasi belum lengkap")
-                    stopSelf()
-                    return@thread
-                }
-
-                val jsch = JSch()
-                // JSch butuh key dalam bentuk byte array; kita simpan tanpa passphrase
-                // di sini demi kesederhanaan -- kalau key.pem kamu ada passphrase,
-                // isi juga di halaman Pengaturan (field passphrase, opsional).
-                val passphrase = prefs.getKeyPassphrase()
-                if (passphrase.isNotBlank()) {
-                    jsch.addIdentity("vps-key", keyBytes, null, passphrase.toByteArray())
-                } else {
-                    jsch.addIdentity("vps-key", keyBytes, null, null)
-                }
-
-                val newSession = jsch.getSession(username, host, port)
-                newSession.setConfig("StrictHostKeyChecking", "no")
-                newSession.timeout = 15000
-                newSession.connect(15000)
-                newSession.setPortForwardingL(localPort, "127.0.0.1", remotePort)
-
-                session = newSession
-                isRunning = true
-                lastError = null
-                updateNotification("Terhubung — tunnel aktif di port $localPort")
-
-                // Jaga service tetap hidup selama session konek
-                while (newSession.isConnected) {
-                    Thread.sleep(2000)
-                }
-            } catch (e: Exception) {
-                lastError = e.message ?: "Error tidak diketahui"
-                updateNotification("Gagal konek: ${e.message}")
-            } finally {
-                isRunning = false
-                session?.disconnect()
-            }
+        if (intent?.action == ACTION_DISCONNECT) {
+            stopTunnel()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelfResult(startId)
+            return START_NOT_STICKY
         }
 
+        startForeground(NOTIF_ID, buildNotification("Menyambungkan ke VPS..."))
+        if (isConnecting || isRunning) return START_NOT_STICKY
+
+        stopping.set(false)
+        lastError = null
+        isConnecting = true
+        executor.execute { connectTunnel() }
         return START_NOT_STICKY
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        isRunning = false
-        session?.disconnect()
+    private fun connectTunnel() {
+        val config = ConfigStore(this)
+        val keyBytes = KeyStore(this).readKey()
+        var connectedSession: Session? = null
+        try {
+            val host = config.getHost()
+            val username = config.getUsername()
+            val sshPort = config.getSshPort()
+            val localPort = config.getLocalPort()
+            val remotePort = config.getRemotePort()
+            val passphrase = config.getKeyPassphrase()
+
+            validatePort(sshPort, "SSH")
+            validatePort(localPort, "local")
+            validatePort(remotePort, "remote")
+            require(host.isNotBlank()) { "Host VPS belum diisi" }
+            require(username.isNotBlank()) { "Username SSH belum diisi" }
+            require(keyBytes != null) { "Key .pem belum dipilih" }
+
+            val jsch = JSch()
+            val knownHosts = File(filesDir, "known_hosts")
+            if (knownHosts.exists()) {
+                jsch.setKnownHosts(knownHosts.absolutePath)
+            }
+
+            if (passphrase.isNotBlank()) {
+                jsch.addIdentity("vps-key", keyBytes, null, passphrase.toByteArray(Charsets.UTF_8))
+            } else {
+                jsch.addIdentity("vps-key", keyBytes, null, null)
+            }
+
+            val newSession = jsch.getSession(username, host, sshPort)
+            val hostAlias = if (sshPort == 22) host else "[$host]:$sshPort"
+            newSession.setHostKeyAlias(hostAlias)
+            newSession.timeout = 15_000
+            newSession.serverAliveInterval = 10_000
+            newSession.serverAliveCountMax = 3
+
+            val knownForAlias = jsch.hostKeyRepository.getHostKey(hostAlias, null)
+            val hasKnownHost = !knownForAlias.isNullOrEmpty()
+            if (!hasKnownHost) {
+                newSession.setConfig("StrictHostKeyChecking", "no")
+            } else {
+                newSession.setConfig("StrictHostKeyChecking", "yes")
+            }
+
+            newSession.connect(15_000)
+            val hostKey = newSession.hostKey ?: error("SSH server tidak mengirim host key")
+            val fingerprint = sha256Fingerprint(hostKey.key)
+            lastFingerprint = fingerprint
+
+            val configuredFingerprint = config.getHostFingerprint()
+            if (configuredFingerprint.isNotBlank() &&
+                !fingerprint.equals(normalizeFingerprint(configuredFingerprint), ignoreCase = true)
+            ) {
+                newSession.disconnect()
+                error("Fingerprint SSH tidak cocok. Diterima: $fingerprint")
+            }
+
+            if (!hasKnownHost) {
+                newSession.hostKeyRepository.add(hostKey, null)
+                config.setHostFingerprint(fingerprint)
+            }
+
+            newSession.setPortForwardingL(localPort, "127.0.0.1", remotePort)
+            connectedSession = newSession
+            session = newSession
+            isRunning = true
+            isConnecting = false
+            lastError = null
+            updateNotification("Terhubung — tunnel localhost:$localPort aktif")
+
+            while (!stopping.get() && newSession.isConnected) {
+                newSession.sendKeepAliveMsg()
+                Thread.sleep(8_000)
+            }
+        } catch (e: Exception) {
+            isConnecting = false
+            isRunning = false
+            if (!stopping.get()) {
+                lastError = cleanError(e)
+                updateNotification("Gagal: ${lastError}")
+            }
+        } finally {
+            try { connectedSession?.disconnect() } catch (_: Exception) { }
+            if (session === connectedSession) session = null
+            isRunning = false
+            isConnecting = false
+            if (!stopping.get()) {
+                updateNotification("Tunnel berhenti")
+                stopSelf()
+            }
+        }
+    }
+
+    private fun stopTunnel() {
+        stopping.set(true)
+        try { session?.disconnect() } catch (_: Exception) { }
         session = null
+        isRunning = false
+        isConnecting = false
+    }
+
+    override fun onDestroy() {
+        stopTunnel()
+        executor.shutdownNow()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun buildNotification(text: String): Notification {
+    private fun validatePort(port: Int, name: String) {
+        require(port in 1..65535) { "Port $name tidak valid: $port" }
+    }
+
+    private fun normalizeFingerprint(value: String): String =
+        value.trim().removePrefix("SHA256:")
+
+    private fun sha256Fingerprint(base64Key: String): String {
+        val raw = Base64.getDecoder().decode(base64Key)
+        val digest = MessageDigest.getInstance("SHA-256").digest(raw)
+        return Base64.getEncoder().withoutPadding().encodeToString(digest)
+    }
+
+    private fun cleanError(error: Throwable): String {
+        val message = error.message?.trim().orEmpty()
+        return when {
+            message.isNotEmpty() -> message.take(220)
+            error is JSchException -> "SSH error"
+            else -> error.javaClass.simpleName
+        }
+    }
+
+    private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "Tunnel VPS", NotificationManager.IMPORTANCE_LOW
-            )
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
+                CHANNEL_ID, "SSH Tunnel", NotificationManager.IMPORTANCE_LOW
+            ).apply { description = "Status koneksi SSH Bot Dashboard" }
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+    }
+
+    private fun buildNotification(text: String): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Bot Dashboard")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
-    }
 
     private fun updateNotification(text: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIF_ID, buildNotification(text))
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIF_ID, buildNotification(text))
     }
 }
