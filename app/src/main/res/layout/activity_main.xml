@@ -19,7 +19,8 @@
             android:text="Belum terhubung"
             android:textColor="#ffffff"
             android:gravity="center_vertical"
-            android:paddingStart="8dp" />
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp" />
 
         <Button
             android:id="@+id/btnConnect"
@@ -31,8 +32,8 @@
             android:id="@+id/btnSettings"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="⚙" />
-
+            android:text="⚙"
+            android:contentDescription="Pengaturan" />
     </LinearLayout>
 
     <WebView
@@ -40,5 +41,4 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />
-
 </LinearLayout>
