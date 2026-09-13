@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "com.botdash.app"
-    compileSdk = 37
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.botdash.app"
         minSdk = 26
-        targetSdk = 37
+        targetSdk = 35
         versionCode = 2
         versionName = "1.1"
     }
