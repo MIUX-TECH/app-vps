@@ -2,6 +2,8 @@ package com.botdash.app
 
 import android.content.Context
 import android.util.Base64
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -26,7 +28,15 @@ class SecureStore(private val context: Context) {
         if (existing is SecretKey) return existing
 
         val generator = KeyGenerator.getInstance("AES", ANDROID_KEYSTORE)
-        generator.init(256)
+        val spec = KeyGenParameterSpec.Builder(
+            KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build()
+        generator.init(spec)
         return generator.generateKey()
     }
 
